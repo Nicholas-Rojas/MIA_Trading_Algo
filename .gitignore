@@ -20,3 +20,6 @@ config.local.*
 .vscode/
 .idea/
 .DS_Store
+
+# Backtest artifacts
+equity_*.png
