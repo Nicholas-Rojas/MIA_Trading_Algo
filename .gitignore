@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.Python
+
+# Environments
+.env
+.venv/
+venv/
+env/
+
+# Secrets / credentials
+*.pem
+*.key
+secrets.json
+config.local.*
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
