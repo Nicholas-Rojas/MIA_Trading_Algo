@@ -1,116 +1,78 @@
-from __future__ import annotations
-
 import math
-from typing import Optional, Tuple
 
-import pandas as pd
-
-from Position import Position
-
+# Sets the stop-loss and take-profit for each trade, decides how many shares
+# to buy, and checks each day whether the stop or target was hit.
 
 class RiskManagement:
-    """Stateless sizing and stop logic. Pure functions of their arguments.
 
-    Deliberately performs no market-data lookups: everything it needs is passed
-    in, so it cannot accidentally read a bar the caller has not reached yet.
-    """
+    def __init__(self, risk_per_trade=0.02, stop_loss_pct=0.05,
+                 take_profit_pct=0.15, max_position_pct=0.25):
 
-    def __init__(
-        self,
-        risk_per_trade: float = 0.02,
-        atr_stop_mult: float = 2.0,
-        atr_target_mult: float = 3.0,
-        max_position_pct: float = 0.25,
-        trail_atr_mult: float = 3.0,
-    ) -> None:
-        """Configure risk parameters.
-
-        risk_per_trade: fraction of equity lost if the stop fills as placed.
-        atr_stop_mult / atr_target_mult: stop and target distance in ATRs.
-        max_position_pct: hard cap on one name's share of equity.
-        trail_atr_mult: chandelier trail distance, wider than the initial stop
-            so a winner is not shaken out by ordinary noise.
-        """
         self.risk_per_trade = risk_per_trade
-        self.atr_stop_mult = atr_stop_mult
-        self.atr_target_mult = atr_target_mult
+        self.stop_loss_pct = stop_loss_pct
+        self.take_profit_pct = take_profit_pct
         self.max_position_pct = max_position_pct
-        self.trail_atr_mult = trail_atr_mult
 
-    def get_stop_price(self, entry_price: float, atr: float) -> float:
-        """Return the initial stop: entry minus atr_stop_mult ATRs.
+    # Calculates and returns stop-price
 
-        Volatility-scaled rather than a fixed percentage, so the stop sits
-        outside the instrument's normal daily range instead of at an arbitrary
-        round number that noise alone would reach.
-        """
-        return entry_price - self.atr_stop_mult * atr
+    def get_stop_price(self, entry_price):
 
-    def get_take_profit(self, entry_price: float, atr: float) -> float:
-        """Return the static take-profit: entry plus atr_target_mult ATRs."""
-        return entry_price + self.atr_target_mult * atr
+        return entry_price * (1 - self.stop_loss_pct)
 
-    def calculate_shares(
-        self,
-        equity: float,
-        cash: float,
-        entry_price: float,
-        stop_price: float,
-    ) -> int:
-        """Return whole shares to buy. May legitimately return 0.
+    # Calculates and returns take-profit price
 
-        Zero is a valid answer, not an error: if the stop is so wide that the
-        risk budget buys less than one share, the correct action is to skip the
-        trade rather than to take more risk than the budget allows.
-        """
+    def get_take_profit(self, entry_price):
+
+        return entry_price * (1 + self.take_profit_pct)
+
+    # Returns how many shares to buy. Starts from the risk rule (lose at most 2% of
+    # equity if the stop hits), then caps at 25% of equity and at available cash.
+    # The smallest of the three wins.
+
+    def calculate_shares(self, equity, cash, entry_price, stop_price):
+
         risk_per_share = entry_price - stop_price
+
         if risk_per_share <= 0 or entry_price <= 0:
+
             return 0
 
+        # Size so that being stopped out costs exactly risk_per_trade of equity.
         risk_dollars = equity * self.risk_per_trade
         shares_by_risk = risk_dollars / risk_per_share
 
-        # Concentration cap: even a tight stop must not put the book into one name.
+        # Concentration cap: never put more than max_position_pct of the book in
+        # one name, however tight the stop is.
         shares_by_exposure = (self.max_position_pct * equity) / entry_price
 
-        # Cash cap: long only, no leverage, so the fill must be fully funded.
+        # Cash cap: long only and no leverage, so the position must be fully funded.
         shares_by_cash = cash / entry_price
 
         shares = min(shares_by_risk, shares_by_exposure, shares_by_cash)
-        if shares < 0:
-            return 0
-        return int(math.floor(shares))
 
-    def update_trailing_stop(self, position: Position, bar: pd.Series, atr: float) -> float:
-        """Return the updated chandelier stop. Ratchets upward only.
+        # 0 is a valid answer: if the risk budget can't fund one whole share, the
+        # correct action is to skip the trade, not to take more risk than allowed.
+        return max(0, int(math.floor(shares)))
 
-        Mutates position.highest_close_since_entry as a side effect, since the
-        running high is what the trail is anchored to. Uses closes rather than
-        intraday highs so a single spike wick cannot pull the stop up to a
-        level the stock never actually held.
-        """
-        close = float(bar["Close"])
-        if close > position.highest_close_since_entry:
-            position.highest_close_since_entry = close
+    # Checks today's bar against the open position's stop and target.
+    # Returns ('STOP', price), ('TARGET', price), or None to stay in.
 
-        chandelier = position.highest_close_since_entry - self.trail_atr_mult * atr
+    def check_exit(self, position, bar):
 
-        # max() enforces the ratchet: a stop never loosens, so realised risk on
-        # an open trade is monotonically non-increasing.
-        return max(position.stop_price, chandelier)
+        # Stop is checked first on purpose. If one daily bar touches both the stop
+        # and the target, OHLC doesn't record which came first, so we assume the
+        # STOP filled. That's the conservative read — assuming the target filled
+        # would turn every ambiguous bar into a win and flatter the backtest.
 
-    def check_exit(self, position: Position, bar: pd.Series) -> Optional[Tuple[str, float]]:
-        """Return ('STOP'|'TARGET', fill_price) if the bar touched a level, else None.
+        if bar['Low'] <= position.stop_price:
 
-        Same-bar ambiguity: when one daily bar's Low <= stop and High >= target,
-        OHLC does not record which was reached first. We assume the STOP filled.
-        That is the conservative read — the alternative flatters every ambiguous
-        bar into a win and is the single easiest way to fake a good backtest.
-        """
-        if float(bar["Low"]) <= position.stop_price:
-            return ("STOP", position.stop_price)
+            # If the day opened below the stop (gap down), the sell fills at the open, not the stop.
+            fill_price = min(position.stop_price, bar['Open'])
 
-        if position.target_price is not None and float(bar["High"]) >= position.target_price:
-            return ("TARGET", position.target_price)
+            return ('STOP', fill_price)
+
+        if bar['High'] >= position.target_price:
+
+            return ('TARGET', position.target_price)
 
         return None
