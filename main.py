@@ -13,7 +13,7 @@ def main():
 
         print('\n\n######## {} ########'.format(ticker))
 
-        data = processor.gather_data(ticker, start_date='2022-01-01', end_date='2025-01-01')
+        data = processor.gather_data(ticker, start_date='2021-01-01', end_date='2025-01-01')
 
         # Fresh engine per ticker: it stores cash and trades, so reusing one would mix results.
 
